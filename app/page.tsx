@@ -1,6 +1,22 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  createUserWithEmailAndPassword,
+  onAuthStateChanged,
+  signInWithEmailAndPassword,
+  signInWithPopup,
+  signOut,
+  type User,
+} from "firebase/auth";
+import { auth, googleProvider } from "@/lib/firebase";
+import {
+  defaultEnergyData,
+  ensureUserProfile,
+  saveUserEnergyData,
+  subscribeUserProfile,
+  type UserProfile,
+} from "@/lib/firestore";
 
 type Device = {
   id: number;
@@ -15,10 +31,10 @@ type SortMode = "Tên A-Z" | "Điện năng giảm dần" | "Công suất giảm
 type UsageType = "Sinh hoạt / Trường học" | "Doanh nghiệp / Công ty";
 
 const presetWatts: Record<string, number> = {
-  "Quạt": 75,
+  Quạt: 75,
   "Đèn LED": 20,
   "Máy chiếu": 250,
-  "Tivi": 120,
+  Tivi: 120,
   "Tủ lạnh": 150,
   "Điều hòa": 1200,
   "Máy tính": 200,
@@ -83,6 +99,14 @@ function estimateCO2(kwh: number) {
 }
 
 export default function Page() {
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+
+  const [email, setEmail] = useState("");
+  const [passwordLogin, setPasswordLogin] = useState("");
+  const [authMode, setAuthMode] = useState<"login" | "register">("login");
+
   const [activeTab, setActiveTab] = useState("Bắt đầu");
   const [usageType, setUsageType] = useState<UsageType>("Sinh hoạt / Trường học");
   const [billingMode, setBillingMode] = useState<BillingMode>("Biểu giá EVN");
@@ -93,9 +117,9 @@ export default function Page() {
   const [power, setPower] = useState("");
   const [quantity, setQuantity] = useState("");
   const [hours, setHours] = useState("");
-  const [price, setPrice] = useState("3000");
-  const [days, setDays] = useState("30");
-  const [savingGoal, setSavingGoal] = useState("50000");
+  const [price, setPrice] = useState("0");
+  const [days, setDays] = useState("0");
+  const [savingGoal, setSavingGoal] = useState("0");
 
   const [searchKeyword, setSearchKeyword] = useState("");
   const [sortMode, setSortMode] = useState<SortMode>("Tên A-Z");
@@ -117,67 +141,116 @@ export default function Page() {
 
   const chartRef = useRef<HTMLCanvasElement | null>(null);
 
+  const isLoggedIn = !!currentUser;
+  const isAdmin = userProfile?.role === "admin";
+
   useEffect(() => {
-    const storedDevices = localStorage.getItem("ecowatt_devices");
-    const storedUsageType = localStorage.getItem("ecowatt_usage_type");
-    const storedPrice = localStorage.getItem("ecowatt_price");
-    const storedDays = localStorage.getItem("ecowatt_days");
-    const storedBillingMode = localStorage.getItem("ecowatt_billing_mode");
-    const storedGoal = localStorage.getItem("ecowatt_saving_goal");
-
-    if (storedDevices) setDevices(JSON.parse(storedDevices));
-    if (
-      storedUsageType === "Sinh hoạt / Trường học" ||
-      storedUsageType === "Doanh nghiệp / Công ty"
-    ) {
-      setUsageType(storedUsageType);
-    }
-    if (storedPrice) setPrice(storedPrice);
-    if (storedDays) setDays(storedDays);
-    if (storedBillingMode === "Đơn giá cố định" || storedBillingMode === "Biểu giá EVN") {
-      setBillingMode(storedBillingMode);
-    }
-    if (storedGoal) setSavingGoal(storedGoal);
-
     setRandomTip(dailyTips[Math.floor(Math.random() * dailyTips.length)]);
   }, []);
 
   useEffect(() => {
-    localStorage.setItem("ecowatt_devices", JSON.stringify(devices));
-  }, [devices]);
+    const unsub = onAuthStateChanged(auth, async (firebaseUser) => {
+      setCurrentUser(firebaseUser);
+
+      if (!firebaseUser) {
+        setUserProfile(null);
+        setDevices([]);
+        setUsageType(defaultEnergyData.usageType);
+        setBillingMode(defaultEnergyData.billingMode);
+        setPrice(defaultEnergyData.price);
+        setDays(defaultEnergyData.days);
+        setSavingGoal(defaultEnergyData.savingGoal);
+        setSavedEnergy(defaultEnergyData.savedEnergy);
+        setSavedCost(defaultEnergyData.savedCost);
+        setAuthLoading(false);
+        return;
+      }
+
+      const forceAdmin =
+        firebaseUser.email?.toLowerCase() ===
+        (process.env.NEXT_PUBLIC_ADMIN_EMAIL || "").toLowerCase();
+
+      await ensureUserProfile({
+        uid: firebaseUser.uid,
+        email: firebaseUser.email,
+        displayName: firebaseUser.displayName,
+        forceAdmin,
+      });
+
+      const unsubProfile = subscribeUserProfile(firebaseUser.uid, (profile) => {
+        setUserProfile(profile);
+
+        if (profile?.data) {
+          setDevices(profile.data.devices || []);
+          setUsageType(profile.data.usageType || defaultEnergyData.usageType);
+          setBillingMode(profile.data.billingMode || defaultEnergyData.billingMode);
+          setPrice(profile.data.price || defaultEnergyData.price);
+          setDays(profile.data.days || defaultEnergyData.days);
+          setSavingGoal(profile.data.savingGoal || defaultEnergyData.savingGoal);
+          setSavedEnergy(profile.data.savedEnergy || 0);
+          setSavedCost(profile.data.savedCost || 0);
+        } else {
+          setDevices(defaultEnergyData.devices);
+          setUsageType(defaultEnergyData.usageType);
+          setBillingMode(defaultEnergyData.billingMode);
+          setPrice(defaultEnergyData.price);
+          setDays(defaultEnergyData.days);
+          setSavingGoal(defaultEnergyData.savingGoal);
+          setSavedEnergy(defaultEnergyData.savedEnergy);
+          setSavedCost(defaultEnergyData.savedCost);
+        }
+
+        setAuthLoading(false);
+      });
+
+      return () => unsubProfile();
+    });
+
+    return () => unsub();
+  }, []);
 
   useEffect(() => {
-    localStorage.setItem("ecowatt_usage_type", usageType);
-  }, [usageType]);
+    if (!currentUser || authLoading) return;
 
-  useEffect(() => {
-    localStorage.setItem("ecowatt_price", price);
-  }, [price]);
+    const timeout = setTimeout(() => {
+      saveUserEnergyData(currentUser.uid, {
+        usageType,
+        billingMode,
+        devices,
+        price,
+        days,
+        savingGoal,
+        savedEnergy,
+        savedCost,
+      }).catch(console.error);
+    }, 500);
 
-  useEffect(() => {
-    localStorage.setItem("ecowatt_days", days);
-  }, [days]);
-
-  useEffect(() => {
-    localStorage.setItem("ecowatt_billing_mode", billingMode);
-  }, [billingMode]);
-
-  useEffect(() => {
-    localStorage.setItem("ecowatt_saving_goal", savingGoal);
-  }, [savingGoal]);
+    return () => clearTimeout(timeout);
+  }, [
+    currentUser,
+    authLoading,
+    usageType,
+    billingMode,
+    devices,
+    price,
+    days,
+    savingGoal,
+    savedEnergy,
+    savedCost,
+  ]);
 
   useEffect(() => {
     if (usageType === "Doanh nghiệp / Công ty") {
       setBillingMode("Đơn giá cố định");
-      if (!price || Number(price) <= 0) {
-        setPrice("2800");
+      if (!price || Number(price) < 0) {
+        setPrice("0");
       }
     }
   }, [usageType, price]);
 
-  const safePrice = Number(price) > 0 ? Number(price) : 3000;
-  const safeDays = Number(days) > 0 ? Number(days) : 30;
-  const safeGoal = Number(savingGoal) > 0 ? Number(savingGoal) : 0;
+  const safePrice = Number(price) >= 0 ? Number(price) : 0;
+  const safeDays = Number(days) >= 0 ? Number(days) : 0;
+  const safeGoal = Number(savingGoal) >= 0 ? Number(savingGoal) : 0;
 
   const totalDay = useMemo(() => {
     return devices.reduce((sum, d) => {
@@ -464,6 +537,66 @@ export default function Page() {
     return () => clearTimeout(timer);
   }, [top3Devices, activeTab]);
 
+  async function handleEmailAuth() {
+    try {
+      if (!email || !passwordLogin) {
+        alert("Vui lòng nhập email và mật khẩu.");
+        return;
+      }
+
+      if (authMode === "register") {
+        const cred = await createUserWithEmailAndPassword(auth, email, passwordLogin);
+
+        const forceAdmin =
+          cred.user.email?.toLowerCase() ===
+          (process.env.NEXT_PUBLIC_ADMIN_EMAIL || "").toLowerCase();
+
+        await ensureUserProfile({
+          uid: cred.user.uid,
+          email: cred.user.email,
+          displayName: cred.user.displayName,
+          forceAdmin,
+        });
+
+        alert("Đăng ký thành công.");
+      } else {
+        await signInWithEmailAndPassword(auth, email, passwordLogin);
+        alert("Đăng nhập thành công.");
+      }
+    } catch (error: any) {
+      console.error(error);
+      alert(error?.message || "Không thể xác thực tài khoản.");
+    }
+  }
+
+  async function handleGoogleLogin() {
+    try {
+      const result = await signInWithPopup(auth, googleProvider);
+
+      const forceAdmin =
+        result.user.email?.toLowerCase() ===
+        (process.env.NEXT_PUBLIC_ADMIN_EMAIL || "").toLowerCase();
+
+      await ensureUserProfile({
+        uid: result.user.uid,
+        email: result.user.email,
+        displayName: result.user.displayName,
+        forceAdmin,
+      });
+    } catch (error: any) {
+      console.error(error);
+      alert(error?.message || "Không thể đăng nhập Google.");
+    }
+  }
+
+  async function handleLogout() {
+    try {
+      await signOut(auth);
+    } catch (error) {
+      console.error(error);
+    }
+  }
+
   async function generateSuggestions() {
     if (devices.length === 0) {
       setAiResult("Vui lòng thêm thiết bị để hệ thống phân tích.");
@@ -699,6 +832,174 @@ export default function Page() {
     URL.revokeObjectURL(url);
   }
 
+  if (authLoading) {
+    return (
+      <main className="min-h-screen flex items-center justify-center bg-slate-950">
+        <div className="rounded-3xl border border-white/10 bg-white/5 px-8 py-6 text-white shadow-2xl backdrop-blur-xl">
+          <p className="font-semibold">Đang tải dữ liệu tài khoản...</p>
+        </div>
+      </main>
+    );
+  }
+
+  if (!isLoggedIn) {
+    return (
+      <main className="relative min-h-screen overflow-hidden bg-[radial-gradient(circle_at_top,#7c3aed_0%,#312e81_30%,#111827_70%,#0f172a_100%)] text-white">
+        <div className="absolute inset-0 overflow-hidden">
+          <div className="absolute -left-20 top-10 h-72 w-72 rounded-full bg-fuchsia-500/20 blur-3xl animate-pulse" />
+          <div className="absolute right-10 top-20 h-80 w-80 rounded-full bg-cyan-400/20 blur-3xl animate-pulse" />
+          <div className="absolute bottom-0 left-1/3 h-72 w-72 rounded-full bg-blue-500/20 blur-3xl animate-pulse" />
+        </div>
+
+        <div className="relative z-10 mx-auto flex min-h-screen max-w-7xl items-center justify-center px-4 py-8">
+          <div className="grid w-full max-w-6xl overflow-hidden rounded-[32px] border border-white/10 bg-white/5 shadow-2xl backdrop-blur-xl md:grid-cols-[420px_1fr]">
+            <div className="relative border-r border-white/10 bg-black/10 p-8 md:p-10">
+              <div className="mb-10 flex items-center gap-3">
+                <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-fuchsia-500/20 text-2xl shadow-lg shadow-fuchsia-500/20">
+                  ⚡
+                </div>
+                <div>
+                  <h1 className="text-lg font-bold tracking-wide">ECOWATT</h1>
+                  <p className="text-xs text-white/60">Track Your Energy</p>
+                </div>
+              </div>
+
+              <div className="mb-8 flex justify-center">
+                <div className="flex h-20 w-20 items-center justify-center rounded-full border border-white/20 bg-white/10 text-3xl shadow-lg shadow-cyan-400/10">
+                  👥
+                </div>
+              </div>
+
+              <div className="mb-6 flex gap-2 rounded-2xl bg-white/5 p-1">
+                <button
+                  onClick={() => setAuthMode("login")}
+                  className={`flex-1 rounded-2xl px-4 py-3 text-sm font-semibold transition ${
+                    authMode === "login"
+                      ? "bg-fuchsia-600 text-white shadow-lg shadow-fuchsia-600/30"
+                      : "text-white/70 hover:bg-white/10"
+                  }`}
+                >
+                  Đăng nhập
+                </button>
+                <button
+                  onClick={() => setAuthMode("register")}
+                  className={`flex-1 rounded-2xl px-4 py-3 text-sm font-semibold transition ${
+                    authMode === "register"
+                      ? "bg-fuchsia-600 text-white shadow-lg shadow-fuchsia-600/30"
+                      : "text-white/70 hover:bg-white/10"
+                  }`}
+                >
+                  Đăng ký
+                </button>
+              </div>
+
+              <div className="space-y-4">
+                <input
+                  type="email"
+                  placeholder="Email / Username"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  className="w-full rounded-full border border-white/25 bg-white/10 px-5 py-3 text-sm text-white placeholder:text-white/50 outline-none transition focus:border-fuchsia-400 focus:bg-white/15"
+                />
+
+                <input
+                  type="password"
+                  placeholder="Password"
+                  value={passwordLogin}
+                  onChange={(e) => setPasswordLogin(e.target.value)}
+                  className="w-full rounded-full border border-white/25 bg-white/10 px-5 py-3 text-sm text-white placeholder:text-white/50 outline-none transition focus:border-fuchsia-400 focus:bg-white/15"
+                />
+
+                <button
+                  onClick={handleEmailAuth}
+                  className="mt-2 w-full rounded-full bg-gradient-to-r from-fuchsia-600 via-pink-500 to-violet-600 px-5 py-3 text-sm font-semibold text-white shadow-lg shadow-fuchsia-700/30 transition hover:scale-[1.02] hover:shadow-fuchsia-500/40"
+                >
+                  {authMode === "login" ? "Log In" : "Create Account"}
+                </button>
+
+                <button
+                  onClick={handleGoogleLogin}
+                  className="w-full rounded-full border border-white/20 bg-white/10 px-5 py-3 text-sm font-semibold text-white transition hover:bg-white/15"
+                >
+                  Đăng nhập với Google
+                </button>
+              </div>
+
+              <div className="mt-6 flex items-center justify-between text-xs text-white/60">
+                <label className="flex items-center gap-2">
+                  <input type="checkbox" className="accent-fuchsia-500" />
+                  <span>Remember me</span>
+                </label>
+                <span className="cursor-pointer hover:text-white">Secure Access</span>
+              </div>
+
+              <div className="mt-8 rounded-2xl border border-white/10 bg-white/5 p-4 text-xs text-white/60">
+                Tài khoản mới sẽ được tạo với dữ liệu mặc định = 0 và lưu riêng theo từng tài khoản.
+              </div>
+            </div>
+
+            <div className="relative hidden min-h-[640px] overflow-hidden md:block">
+              <div className="absolute inset-0 bg-[radial-gradient(circle_at_30%_30%,rgba(168,85,247,0.30),transparent_25%),radial-gradient(circle_at_70%_35%,rgba(34,211,238,0.25),transparent_20%),radial-gradient(circle_at_70%_70%,rgba(236,72,153,0.22),transparent_20%)]" />
+
+              <div className="absolute inset-0">
+                <div className="absolute left-[-10%] top-[30%] h-24 w-[70%] rotate-[-8deg] rounded-full bg-cyan-400/30 blur-2xl animate-pulse" />
+                <div className="absolute left-[25%] top-[45%] h-20 w-[65%] rotate-[10deg] rounded-full bg-fuchsia-500/30 blur-2xl animate-pulse" />
+                <div className="absolute left-[10%] top-[58%] h-24 w-[75%] rotate-[-6deg] rounded-full bg-violet-500/30 blur-2xl animate-pulse" />
+                <div className="absolute left-[35%] top-[52%] h-16 w-[40%] rotate-[14deg] rounded-full bg-white/30 blur-2xl" />
+              </div>
+
+              <div className="relative z-10 flex h-full flex-col justify-between p-10 lg:p-14">
+                <div className="flex items-center justify-end gap-8 text-xs font-medium uppercase tracking-[0.2em] text-white/70">
+                  <span className="cursor-pointer transition hover:text-white">Home</span>
+                  <span className="cursor-pointer transition hover:text-white">Download</span>
+                  <span className="cursor-pointer transition hover:text-white">About</span>
+                  <span className="cursor-pointer transition hover:text-white">
+                    {authMode === "login" ? "Register" : "Login"}
+                  </span>
+                </div>
+
+                <div className="max-w-xl">
+                  <p className="animate-[fadeInUp_0.8s_ease-out] text-6xl font-black leading-none tracking-tight text-white drop-shadow-[0_0_30px_rgba(255,255,255,0.15)] lg:text-7xl">
+                    Welcome
+                    <br />
+                    Back.
+                  </p>
+                  <p className="mt-6 max-w-md text-base leading-7 text-white/70">
+                    Đăng nhập để theo dõi điện năng, lưu dữ liệu cá nhân theo tài khoản và nhận
+                    các gợi ý thông minh cho việc tiết kiệm điện.
+                  </p>
+                </div>
+
+                <div className="text-sm text-white/50">
+                  EcoWatt Platform • Smart Energy Dashboard
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <style jsx global>{`
+          @keyframes fadeInUp {
+            from {
+              opacity: 0;
+              transform: translateY(24px);
+            }
+            to {
+              opacity: 1;
+              transform: translateY(0);
+            }
+          }
+
+          @keyframes spin {
+            to {
+              transform: rotate(360deg);
+            }
+          }
+        `}</style>
+      </main>
+    );
+  }
+
   return (
     <main className="min-h-screen bg-slate-50 text-slate-900">
       <div className="bg-blue-900 text-white shadow-md">
@@ -708,20 +1009,48 @@ export default function Page() {
             <p className="text-sm text-blue-100">Track Your Energy, Save Your Money</p>
           </div>
 
-          <div className="flex flex-wrap gap-2">
-            {tabs.map((tab) => (
+          <div className="flex flex-col gap-3 md:items-end">
+            <div className="flex flex-wrap gap-2">
+              {tabs.map((tab) => (
+                <button
+                  key={tab}
+                  onClick={() => setActiveTab(tab)}
+                  className={`rounded-xl px-4 py-2 text-sm font-medium transition ${
+                    activeTab === tab
+                      ? "bg-blue-600 text-white"
+                      : "bg-white/10 text-white hover:bg-white/20"
+                  }`}
+                >
+                  {tab}
+                </button>
+              ))}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="rounded-2xl bg-white/10 px-4 py-2 text-sm text-white">
+                <div className="flex flex-wrap items-center gap-2">
+                  <p className="font-semibold">{userProfile?.displayName || currentUser?.email}</p>
+
+                  {isAdmin && (
+                    <span className="relative inline-flex overflow-hidden rounded-full p-[1px]">
+                      <span className="absolute inset-[-1000%] animate-[spin_4s_linear_infinite] bg-[conic-gradient(from_90deg_at_50%_50%,#22d3ee_0%,#a855f7_25%,#ec4899_50%,#22d3ee_100%)]" />
+                      <span className="relative inline-flex items-center rounded-full bg-slate-900/90 px-3 py-1 text-[11px] font-bold uppercase tracking-[0.18em] text-white shadow-lg shadow-fuchsia-500/20">
+                        Admin
+                      </span>
+                    </span>
+                  )}
+                </div>
+
+                {!isAdmin && <p className="text-blue-100">Quyền: Người dùng</p>}
+              </div>
+
               <button
-                key={tab}
-                onClick={() => setActiveTab(tab)}
-                className={`rounded-xl px-4 py-2 text-sm font-medium transition ${
-                  activeTab === tab
-                    ? "bg-blue-600 text-white"
-                    : "bg-white/10 text-white hover:bg-white/20"
-                }`}
+                onClick={handleLogout}
+                className="rounded-xl bg-red-500 px-4 py-2 text-sm font-semibold text-white hover:bg-red-600"
               >
-                {tab}
+                Đăng xuất
               </button>
-            ))}
+            </div>
           </div>
         </div>
       </div>
@@ -746,7 +1075,7 @@ export default function Page() {
                   onClick={() => {
                     setUsageType("Sinh hoạt / Trường học");
                     setBillingMode("Biểu giá EVN");
-                    setDays("30");
+                    if (days === "0") setDays("30");
                   }}
                   className={`rounded-2xl px-5 py-4 text-left transition ${
                     usageType === "Sinh hoạt / Trường học"
@@ -764,8 +1093,8 @@ export default function Page() {
                   onClick={() => {
                     setUsageType("Doanh nghiệp / Công ty");
                     setBillingMode("Đơn giá cố định");
-                    setDays("30");
-                    setPrice("2800");
+                    if (days === "0") setDays("30");
+                    if (price === "0") setPrice("2800");
                   }}
                   className={`rounded-2xl px-5 py-4 text-left transition ${
                     usageType === "Doanh nghiệp / Công ty"
